@@ -18,6 +18,9 @@ WATCH_TYPE = "local"
 TRIGGER_FILE = "trigger.txt"
 CHECK_INTERVAL_SECONDS = 3
 MAX_RETRY = 10
+# 監視起点の許容ラグ（時間）。
+# 例: 2 の場合、プログラム実行時刻の 2 時間前以降に更新された trigger を検知対象にする。
+LOOKBACK_HOURS = 2
 
 # ---- local 用 ----
 TARGET_DIR = r"/path/to/your/directory"  # 監視するローカルディレクトリ
@@ -51,7 +54,7 @@ def _log(level: str, message: str, attempt: int | None = None, total: int | None
     print(f"[{timestamp}] [{level}]{progress} {message}")
 
 
-def _wait_for_local_trigger() -> int:
+def _wait_for_local_trigger(watch_start_timestamp: float) -> int:
     """ローカルファイルシステム上の trigger ファイルを待機する。"""
     target_path = os.path.join(TARGET_DIR, TRIGGER_FILE)
 
@@ -59,8 +62,21 @@ def _wait_for_local_trigger() -> int:
         _log("INFO", f"ローカルパスを確認中: {target_path}", attempt, MAX_RETRY)
 
         if os.path.exists(target_path):
-            _log("SUCCESS", "trigger.txt をローカルファイルシステム上で検知しました。", attempt, MAX_RETRY)
-            return 0
+            modified_timestamp = os.path.getmtime(target_path)
+            if modified_timestamp >= watch_start_timestamp:
+                _log("SUCCESS", "trigger.txt をローカルファイルシステム上で検知しました。", attempt, MAX_RETRY)
+                return 0
+
+            modified_datetime = datetime.fromtimestamp(modified_timestamp).strftime("%Y-%m-%d %H:%M:%S")
+            _log(
+                "INFO",
+                (
+                    "trigger.txt は存在しますが監視対象時刻より古いため未検知として扱います: "
+                    f"mtime={modified_datetime}"
+                ),
+                attempt,
+                MAX_RETRY,
+            )
 
         if attempt < MAX_RETRY:
             _log("INFO", f"未検知のため {CHECK_INTERVAL_SECONDS} 秒待機します。", attempt, MAX_RETRY)
@@ -70,7 +86,7 @@ def _wait_for_local_trigger() -> int:
     return 1
 
 
-def _wait_for_sftp_trigger() -> int:
+def _wait_for_sftp_trigger(watch_start_timestamp: float) -> int:
     """SFTP サーバー上の trigger ファイルを待機する。"""
     try:
         import paramiko
@@ -95,10 +111,22 @@ def _wait_for_sftp_trigger() -> int:
             transport.connect(username=SFTP_USERNAME, password=SFTP_PASSWORD)
             sftp = paramiko.SFTPClient.from_transport(transport)
 
-            # stat が成功すればファイルは存在
-            sftp.stat(remote_trigger_path)
-            _log("SUCCESS", "trigger.txt を SFTP サーバー上で検知しました。", attempt, MAX_RETRY)
-            return 0
+            file_stat = sftp.stat(remote_trigger_path)
+            modified_timestamp = file_stat.st_mtime
+            if modified_timestamp >= watch_start_timestamp:
+                _log("SUCCESS", "trigger.txt を SFTP サーバー上で検知しました。", attempt, MAX_RETRY)
+                return 0
+
+            modified_datetime = datetime.fromtimestamp(modified_timestamp).strftime("%Y-%m-%d %H:%M:%S")
+            _log(
+                "INFO",
+                (
+                    "trigger.txt は存在しますが監視対象時刻より古いため未検知として扱います: "
+                    f"mtime={modified_datetime}"
+                ),
+                attempt,
+                MAX_RETRY,
+            )
         except FileNotFoundError:
             if attempt < MAX_RETRY:
                 _log("INFO", f"未検知のため {CHECK_INTERVAL_SECONDS} 秒待機します。", attempt, MAX_RETRY)
@@ -124,11 +152,20 @@ def _wait_for_sftp_trigger() -> int:
 def wait_for_trigger() -> int:
     """設定された監視方式で trigger ファイルの出現を待機する。"""
     watch_type = WATCH_TYPE.lower().strip()
+    watch_start_timestamp = time.time() - (LOOKBACK_HOURS * 60 * 60)
+    watch_start_datetime = datetime.fromtimestamp(watch_start_timestamp).strftime("%Y-%m-%d %H:%M:%S")
+    _log(
+        "INFO",
+        (
+            "監視対象時刻を設定しました。"
+            f"この時刻以降に更新された {TRIGGER_FILE} を検知します: {watch_start_datetime}"
+        ),
+    )
 
     if watch_type == "local":
-        return _wait_for_local_trigger()
+        return _wait_for_local_trigger(watch_start_timestamp)
     if watch_type == "sftp":
-        return _wait_for_sftp_trigger()
+        return _wait_for_sftp_trigger(watch_start_timestamp)
 
     _log("ERROR", f"未対応の WATCH_TYPE: {WATCH_TYPE}。'local' または 'sftp' を指定してください。")
     return 1
