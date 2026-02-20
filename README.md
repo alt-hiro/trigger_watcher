@@ -12,6 +12,7 @@
 ## できること
 
 - 指定した場所に `trigger.txt` が存在するかを一定間隔で確認
+- `trigger.txt` の更新時刻（mtime）が、監視対象時刻以降かどうかを確認
 - 見つかるまで最大 `MAX_RETRY` 回リトライ
 - ログに **実行タイムスタンプ** を出力
 - ログに **「n回中m回目」**（進捗）を出力
@@ -38,6 +39,7 @@ WATCH_TYPE = "local"
 TRIGGER_FILE = "trigger.txt"
 CHECK_INTERVAL_SECONDS = 3
 MAX_RETRY = 10
+LOOKBACK_HOURS = 2
 
 TARGET_DIR = r"/path/to/your/directory"
 
@@ -61,6 +63,10 @@ SFTP_TARGET_DIR = "/path/to/remote/directory"
   - 最大試行回数
 - `TARGET_DIR`
   - ローカル監視先ディレクトリ
+- `LOOKBACK_HOURS`
+  - 監視起点の許容ラグ（時間）
+  - 監視対象時刻は「プログラム実行時刻 - `LOOKBACK_HOURS` 時間」
+  - 既に `trigger.txt` が存在していても、この時刻より古い更新時刻なら未検知として扱う
 - `SFTP_*`
   - SFTP 接続情報
 - `SFTP_TARGET_DIR`
@@ -99,4 +105,3 @@ pip install paramiko
 - **関数 docstring**: 各関数の役割と引数説明
 
 IDE 上のホバーや `help()` で参照できます。
-
