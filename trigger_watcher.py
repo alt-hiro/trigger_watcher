@@ -7,9 +7,7 @@
 
 import base64
 import os
-import shutil
 import socket
-import subprocess
 import sys
 import time
 from io import StringIO
@@ -39,7 +37,7 @@ SFTP_AUTH_METHOD = "password"  # "password" または "key"
 SFTP_PASSWORD = os.getenv("SFTP_PASSWORD", "")  # password 認証で利用
 SFTP_PRIVATE_KEY_ENV = "SFTP_PRIVATE_KEY"  # key 認証で利用する秘密鍵の環境変数名
 SFTP_PRIVATE_KEY_PASSPHRASE = os.getenv("SFTP_PRIVATE_KEY_PASSPHRASE", "")  # 任意
-SFTP_PRIVATE_KEY_PATH = os.getenv("SFTP_PRIVATE_KEY_PATH", "")  # key 認証で利用する秘密鍵ファイルパス（.ppk を含む）
+SFTP_PRIVATE_KEY_PATH = os.getenv("SFTP_PRIVATE_KEY_PATH", "")  # key 認証で利用する秘密鍵ファイルパス
 
 SFTP_USE_HTTP_PROXY_RAW = os.getenv("SFTP_USE_HTTP_PROXY", "false")
 SFTP_USE_HTTP_PROXY = SFTP_USE_HTTP_PROXY_RAW.lower() in ("1", "true", "yes", "on")  # True のとき HTTP proxy (CONNECT) 経由で SFTP 接続する
@@ -183,42 +181,24 @@ def _wait_for_sftp_trigger(watch_start_timestamp: float) -> int:
         if not key_path.exists():
             raise ValueError(f"秘密鍵ファイルが見つかりません: {key_path}")
 
-        if key_path.suffix.lower() == ".ppk":
-            puttygen_path = shutil.which("puttygen")
-            if puttygen_path is None:
-                raise ValueError(
-                    "PPK 鍵を利用するには puttygen が必要です。"
-                    " puttygen を導入するか OpenSSH 形式へ変換してください。"
+        load_key_errors = []
+        for key_cls in (
+            paramiko.RSAKey,
+            paramiko.Ed25519Key,
+            paramiko.ECDSAKey,
+            paramiko.DSSKey,
+        ):
+            try:
+                return key_cls.from_private_key_file(
+                    str(key_path),
+                    password=SFTP_PRIVATE_KEY_PASSPHRASE or None,
                 )
+            except Exception as exc:  # noqa: PERF203
+                load_key_errors.append(f"{key_cls.__name__}: {exc}")
 
-            command = [
-                puttygen_path,
-                str(key_path),
-                "-O",
-                "private-openssh",
-            ]
-            if SFTP_PRIVATE_KEY_PASSPHRASE:
-                command.extend(["--old-passphrase", "-", "--new-passphrase", "-"])
-                converted = subprocess.run(
-                    command,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                    input=f"{SFTP_PRIVATE_KEY_PASSPHRASE}\n\n",
-                )
-            else:
-                converted = subprocess.run(
-                    command,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-
-            return _load_private_key_from_string(converted.stdout)
-
-        return paramiko.PKey.from_path(
-            str(key_path),
-            passphrase=SFTP_PRIVATE_KEY_PASSPHRASE or None,
+        raise ValueError(
+            f"秘密鍵ファイルの読み込みに失敗しました: {key_path}. "
+            f"試行結果: {' | '.join(load_key_errors)}"
         )
 
     def _connect_transport(transport: "paramiko.Transport") -> None:
