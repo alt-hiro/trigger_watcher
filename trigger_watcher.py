@@ -7,10 +7,13 @@
 
 import base64
 import os
+import shutil
 import socket
+import subprocess
 import sys
 import time
 from io import StringIO
+from pathlib import Path
 from datetime import datetime
 
 # ===== 設定（担当者が手で変更する想定のエリア） =====
@@ -36,6 +39,7 @@ SFTP_AUTH_METHOD = "password"  # "password" または "key"
 SFTP_PASSWORD = os.getenv("SFTP_PASSWORD", "")  # password 認証で利用
 SFTP_PRIVATE_KEY_ENV = "SFTP_PRIVATE_KEY"  # key 認証で利用する秘密鍵の環境変数名
 SFTP_PRIVATE_KEY_PASSPHRASE = os.getenv("SFTP_PRIVATE_KEY_PASSPHRASE", "")  # 任意
+SFTP_PRIVATE_KEY_PATH = os.getenv("SFTP_PRIVATE_KEY_PATH", "")  # key 認証で利用する秘密鍵ファイルパス（.ppk を含む）
 
 SFTP_USE_HTTP_PROXY_RAW = os.getenv("SFTP_USE_HTTP_PROXY", "false")
 SFTP_USE_HTTP_PROXY = SFTP_USE_HTTP_PROXY_RAW.lower() in ("1", "true", "yes", "on")  # True のとき HTTP proxy (CONNECT) 経由で SFTP 接続する
@@ -146,6 +150,77 @@ def _wait_for_sftp_trigger(watch_start_timestamp: float) -> int:
 
         return proxy_socket
 
+    def _load_private_key_from_string(key_text: str) -> "paramiko.PKey":
+        normalized_key = key_text.replace("\\n", "\n")
+        key_stream = StringIO(normalized_key)
+
+        load_key_errors = []
+        for key_cls in (
+            paramiko.RSAKey,
+            paramiko.Ed25519Key,
+            paramiko.ECDSAKey,
+            paramiko.DSSKey,
+        ):
+            key_stream.seek(0)
+            try:
+                return key_cls.from_private_key(
+                    key_stream,
+                    password=SFTP_PRIVATE_KEY_PASSPHRASE or None,
+                )
+            except Exception as exc:  # noqa: PERF203
+                load_key_errors.append(f"{key_cls.__name__}: {exc}")
+
+        raise ValueError(
+            "秘密鍵の読み込みに失敗しました。"
+            f"試行結果: {' | '.join(load_key_errors)}"
+        )
+
+    def _load_private_key_from_file() -> "paramiko.PKey":
+        if not SFTP_PRIVATE_KEY_PATH:
+            raise ValueError("SFTP_PRIVATE_KEY_PATH が未設定です。")
+
+        key_path = Path(SFTP_PRIVATE_KEY_PATH).expanduser()
+        if not key_path.exists():
+            raise ValueError(f"秘密鍵ファイルが見つかりません: {key_path}")
+
+        if key_path.suffix.lower() == ".ppk":
+            puttygen_path = shutil.which("puttygen")
+            if puttygen_path is None:
+                raise ValueError(
+                    "PPK 鍵を利用するには puttygen が必要です。"
+                    " puttygen を導入するか OpenSSH 形式へ変換してください。"
+                )
+
+            command = [
+                puttygen_path,
+                str(key_path),
+                "-O",
+                "private-openssh",
+            ]
+            if SFTP_PRIVATE_KEY_PASSPHRASE:
+                command.extend(["--old-passphrase", "-", "--new-passphrase", "-"])
+                converted = subprocess.run(
+                    command,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    input=f"{SFTP_PRIVATE_KEY_PASSPHRASE}\n\n",
+                )
+            else:
+                converted = subprocess.run(
+                    command,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+
+            return _load_private_key_from_string(converted.stdout)
+
+        return paramiko.PKey.from_path(
+            str(key_path),
+            passphrase=SFTP_PRIVATE_KEY_PASSPHRASE or None,
+        )
+
     def _connect_transport(transport: "paramiko.Transport") -> None:
         if auth_method == "password":
             if not SFTP_PASSWORD:
@@ -155,36 +230,14 @@ def _wait_for_sftp_trigger(watch_start_timestamp: float) -> int:
 
         if auth_method == "key":
             private_key_content = os.getenv(SFTP_PRIVATE_KEY_ENV, "")
-            if not private_key_content:
+            if private_key_content:
+                private_key = _load_private_key_from_string(private_key_content)
+            elif SFTP_PRIVATE_KEY_PATH:
+                private_key = _load_private_key_from_file()
+            else:
                 raise ValueError(
-                    f"{SFTP_PRIVATE_KEY_ENV} が未設定です。秘密鍵を環境変数へ設定してください。"
-                )
-
-            normalized_key = private_key_content.replace("\\n", "\n")
-            key_stream = StringIO(normalized_key)
-
-            load_key_errors = []
-            private_key = None
-            for key_cls in (
-                paramiko.RSAKey,
-                paramiko.Ed25519Key,
-                paramiko.ECDSAKey,
-                paramiko.DSSKey,
-            ):
-                key_stream.seek(0)
-                try:
-                    private_key = key_cls.from_private_key(
-                        key_stream,
-                        password=SFTP_PRIVATE_KEY_PASSPHRASE or None,
-                    )
-                    break
-                except Exception as exc:  # noqa: PERF203
-                    load_key_errors.append(f"{key_cls.__name__}: {exc}")
-
-            if private_key is None:
-                raise ValueError(
-                    "秘密鍵の読み込みに失敗しました。"
-                    f"試行結果: {' | '.join(load_key_errors)}"
+                    f"{SFTP_PRIVATE_KEY_ENV} または SFTP_PRIVATE_KEY_PATH が未設定です。"
+                    "秘密鍵を環境変数またはファイルで指定してください。"
                 )
 
             transport.connect(username=SFTP_USERNAME, pkey=private_key)
