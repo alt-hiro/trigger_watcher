@@ -1,11 +1,12 @@
 """trigger_watcher
 
-ローカルまたは SFTP 上の `trigger.txt` の出現をポーリング監視するスクリプト。
+ローカルまたは SFTP 上の trigger ファイルの出現をポーリング監視するスクリプト。
 
 利用者は設定セクションの値を編集することで、監視先やリトライ回数を変更できます。
 """
 
 import base64
+import fnmatch
 import os
 import socket
 import sys
@@ -19,7 +20,7 @@ from datetime import datetime
 WATCH_TYPE = "local"
 
 # ---- 共通 ----
-TRIGGER_FILE = "trigger.txt"
+TRIGGER_FILE = "trigger.txt"  # 例: "trigger.txt" / "Trigger_*.txt"
 CHECK_INTERVAL_SECONDS = 3
 MAX_RETRY = 10
 # 監視起点の許容ラグ（時間）。
@@ -68,23 +69,39 @@ def _log(level: str, message: str, attempt: int | None = None, total: int | None
 
 def _wait_for_local_trigger(watch_start_timestamp: float) -> int:
     """ローカルファイルシステム上の trigger ファイルを待機する。"""
-    target_path = os.path.join(TARGET_DIR, TRIGGER_FILE)
+    target_dir = Path(TARGET_DIR)
 
     for attempt in range(1, MAX_RETRY + 1):
-        _log("INFO", f"ローカルパスを確認中: {target_path}", attempt, MAX_RETRY)
+        _log("INFO", f"ローカルパスを確認中: {target_dir}/{TRIGGER_FILE}", attempt, MAX_RETRY)
 
-        if os.path.exists(target_path):
-            modified_timestamp = os.path.getmtime(target_path)
+        try:
+            matched_files = [
+                target_dir / file_name
+                for file_name in os.listdir(target_dir)
+                if fnmatch.fnmatchcase(file_name, TRIGGER_FILE)
+            ]
+        except FileNotFoundError:
+            _log("ERROR", f"TARGET_DIR が見つかりません: {target_dir}", attempt, MAX_RETRY)
+            return 1
+
+        if matched_files:
+            latest_file_path = max(matched_files, key=os.path.getmtime)
+            modified_timestamp = os.path.getmtime(latest_file_path)
             if modified_timestamp >= watch_start_timestamp:
-                _log("SUCCESS", "trigger.txt をローカルファイルシステム上で検知しました。", attempt, MAX_RETRY)
+                _log(
+                    "SUCCESS",
+                    f"{latest_file_path.name} をローカルファイルシステム上で検知しました。",
+                    attempt,
+                    MAX_RETRY,
+                )
                 return 0
 
             modified_datetime = datetime.fromtimestamp(modified_timestamp).strftime("%Y-%m-%d %H:%M:%S")
             _log(
                 "INFO",
                 (
-                    "trigger.txt は存在しますが監視対象時刻より古いため未検知として扱います: "
-                    f"mtime={modified_datetime}"
+                    "一致ファイルは存在しますが監視対象時刻より古いため未検知として扱います: "
+                    f"file={latest_file_path.name}, mtime={modified_datetime}"
                 ),
                 attempt,
                 MAX_RETRY,
@@ -94,7 +111,7 @@ def _wait_for_local_trigger(watch_start_timestamp: float) -> int:
             _log("INFO", f"未検知のため {CHECK_INTERVAL_SECONDS} 秒待機します。", attempt, MAX_RETRY)
             time.sleep(CHECK_INTERVAL_SECONDS)
 
-    _log("ERROR", f"{MAX_RETRY} 回試行しましたが trigger.txt が見つかりませんでした。")
+    _log("ERROR", f"{MAX_RETRY} 回試行しましたが {TRIGGER_FILE} に一致するファイルが見つかりませんでした。")
     return 1
 
 
@@ -106,7 +123,7 @@ def _wait_for_sftp_trigger(watch_start_timestamp: float) -> int:
         _log("ERROR", "SFTP モードでは 'paramiko' が必要です。pip install paramiko で導入してください。")
         return 1
 
-    remote_trigger_path = f"{SFTP_TARGET_DIR.rstrip('/')}/{TRIGGER_FILE}"
+    remote_target_dir = SFTP_TARGET_DIR.rstrip("/")
     auth_method = SFTP_AUTH_METHOD.lower().strip()
 
     def _open_http_proxy_tunnel() -> socket.socket:
@@ -230,7 +247,7 @@ def _wait_for_sftp_trigger(watch_start_timestamp: float) -> int:
     for attempt in range(1, MAX_RETRY + 1):
         _log(
             "INFO",
-            f"SFTP パスを確認中: {SFTP_HOST}:{remote_trigger_path}",
+            f"SFTP パスを確認中: {SFTP_HOST}:{remote_target_dir}/{TRIGGER_FILE}",
             attempt,
             MAX_RETRY,
         )
@@ -248,18 +265,27 @@ def _wait_for_sftp_trigger(watch_start_timestamp: float) -> int:
             _connect_transport(transport)
             sftp = paramiko.SFTPClient.from_transport(transport)
 
-            file_stat = sftp.stat(remote_trigger_path)
-            modified_timestamp = file_stat.st_mtime
+            matched_files = [
+                file_attr
+                for file_attr in sftp.listdir_attr(remote_target_dir)
+                if fnmatch.fnmatchcase(file_attr.filename, TRIGGER_FILE)
+            ]
+
+            if not matched_files:
+                raise FileNotFoundError
+
+            latest_file = max(matched_files, key=lambda file_attr: file_attr.st_mtime)
+            modified_timestamp = latest_file.st_mtime
             if modified_timestamp >= watch_start_timestamp:
-                _log("SUCCESS", "trigger.txt を SFTP サーバー上で検知しました。", attempt, MAX_RETRY)
+                _log("SUCCESS", f"{latest_file.filename} を SFTP サーバー上で検知しました。", attempt, MAX_RETRY)
                 return 0
 
             modified_datetime = datetime.fromtimestamp(modified_timestamp).strftime("%Y-%m-%d %H:%M:%S")
             _log(
                 "INFO",
                 (
-                    "trigger.txt は存在しますが監視対象時刻より古いため未検知として扱います: "
-                    f"mtime={modified_datetime}"
+                    "一致ファイルは存在しますが監視対象時刻より古いため未検知として扱います: "
+                    f"file={latest_file.filename}, mtime={modified_datetime}"
                 ),
                 attempt,
                 MAX_RETRY,
@@ -269,7 +295,7 @@ def _wait_for_sftp_trigger(watch_start_timestamp: float) -> int:
                 _log("INFO", f"未検知のため {CHECK_INTERVAL_SECONDS} 秒待機します。", attempt, MAX_RETRY)
                 time.sleep(CHECK_INTERVAL_SECONDS)
             else:
-                _log("ERROR", f"{MAX_RETRY} 回試行しましたが trigger.txt が見つかりませんでした。")
+                _log("ERROR", f"{MAX_RETRY} 回試行しましたが {TRIGGER_FILE} に一致するファイルが見つかりませんでした。")
         except Exception as exc:
             _log("ERROR", f"SFTP チェックに失敗しました: {exc}", attempt, MAX_RETRY)
             if attempt < MAX_RETRY:
@@ -297,7 +323,7 @@ def wait_for_trigger() -> int:
         "INFO",
         (
             "監視対象時刻を設定しました。"
-            f"この時刻以降に更新された {TRIGGER_FILE} を検知します: {watch_start_datetime}"
+            f"この時刻以降に更新された {TRIGGER_FILE} に一致するファイルを検知します: {watch_start_datetime}"
         ),
     )
 

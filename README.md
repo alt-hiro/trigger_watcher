@@ -1,6 +1,6 @@
 # trigger_watcher
 
-`trigger_watcher.py` は、`trigger.txt` が作成されるのを待機するためのシンプルな監視スクリプトです。
+`trigger_watcher.py` は、指定パターンに一致する trigger ファイルが作成されるのを待機するためのシンプルな監視スクリプトです。
 
 - ローカルディレクトリ監視（`WATCH_TYPE = "local"`）
 - SFTP 先ディレクトリ監視（`WATCH_TYPE = "sftp"`）
@@ -11,8 +11,8 @@
 
 ## できること
 
-- 指定した場所に `trigger.txt` が存在するかを一定間隔で確認
-- `trigger.txt` の更新時刻（mtime）が、監視対象時刻以降かどうかを確認
+- 指定した場所に `TRIGGER_FILE`（ワイルドカード可）が存在するかを一定間隔で確認
+- 一致したファイルの更新時刻（mtime）が、監視対象時刻以降かどうかを確認
 - 見つかるまで最大 `MAX_RETRY` 回リトライ
 - ログに **実行タイムスタンプ** を出力
 - ログに **「n回中m回目」**（進捗）を出力
@@ -20,9 +20,9 @@
 ログ出力例:
 
 ```text
-[2026-02-20 10:00:00] [INFO] [10回中1回目] ローカルパスを確認中: /tmp/watch/trigger.txt
+[2026-02-20 10:00:00] [INFO] [10回中1回目] ローカルパスを確認中: /tmp/watch/Trigger_*.txt
 [2026-02-20 10:00:03] [INFO] [10回中2回目] 未検知のため 3 秒待機します。
-[2026-02-20 10:00:06] [SUCCESS] [10回中3回目] trigger.txt をローカルファイルシステム上で検知しました。
+[2026-02-20 10:00:06] [SUCCESS] [10回中3回目] Trigger_20260218113548.158168.txt をローカルファイルシステム上で検知しました。
 ```
 
 ---
@@ -36,7 +36,7 @@
 ```python
 # ===== 設定（担当者が手で変更する想定のエリア） =====
 WATCH_TYPE = "local"
-TRIGGER_FILE = "trigger.txt"
+TRIGGER_FILE = "Trigger_*.txt"
 CHECK_INTERVAL_SECONDS = 3
 MAX_RETRY = 10
 LOOKBACK_HOURS = 2
@@ -64,10 +64,12 @@ SFTP_TARGET_DIR = "/path/to/remote/directory"
 
 #### 設定項目の説明
 
+> `TRIGGER_FILE` は `fnmatch` 形式のワイルドカード（`*`, `?`, `[abc]` など）を利用できます。
+
 - `WATCH_TYPE`
   - `"local"` または `"sftp"`
 - `TRIGGER_FILE`
-  - 監視対象のファイル名（通常は `trigger.txt`）
+  - 監視対象のファイル名またはパターン（例: `trigger.txt`, `Trigger_*.txt`）
 - `CHECK_INTERVAL_SECONDS`
   - 見つからなかったときの待機秒数
 - `MAX_RETRY`
@@ -77,7 +79,7 @@ SFTP_TARGET_DIR = "/path/to/remote/directory"
 - `LOOKBACK_HOURS`
   - 監視起点の許容ラグ（時間）
   - 監視対象時刻は「プログラム実行時刻 - `LOOKBACK_HOURS` 時間」
-  - 既に `trigger.txt` が存在していても、この時刻より古い更新時刻なら未検知として扱う
+  - 既に一致ファイルが存在していても、この時刻より古い更新時刻なら未検知として扱う
 - `SFTP_AUTH_METHOD`
   - SFTP 認証方式（`"password"` / `"key"`）
 - `SFTP_PASSWORD`
