@@ -89,7 +89,7 @@ SFTP_TARGET_DIR = "/path/to/remote/directory"
   - 鍵がパスフレーズ付きの場合のパスフレーズ（任意）
 - `SFTP_PRIVATE_KEY_PATH`
   - `key` 認証時に利用する秘密鍵ファイルパス（任意）
-  - `.ppk` を指定した場合は `puttygen` がインストール済みなら自動で OpenSSH 形式へ変換して利用
+  - OpenSSH 形式 / PuTTY PPK 形式の秘密鍵ファイルを直接読み込み可能
 - `SFTP_USE_HTTP_PROXY`
   - `True` のとき HTTP proxy（CONNECT）経由で SFTP 接続
 - `SFTP_HTTP_PROXY_HOST` / `SFTP_HTTP_PROXY_PORT`
@@ -112,7 +112,7 @@ export SFTP_PRIVATE_KEY_PASSPHRASE="your_passphrase"
 ```
 
 
-#### ppk 鍵ファイルを使うときの環境変数例
+#### ppk 鍵ファイルを使うときの環境変数例（Pythonのみで完結）
 
 ```bash
 export SFTP_AUTH_METHOD="key"
@@ -121,7 +121,7 @@ export SFTP_PRIVATE_KEY_PATH="/path/to/key.ppk"
 export SFTP_PRIVATE_KEY_PASSPHRASE="your_ppk_passphrase"
 ```
 
-> 注意: `.ppk` を直接使う場合は `puttygen` コマンドが必要です。未導入の場合は、事前に OpenSSH 形式へ変換してください。
+> 補足: `.ppk` の読み込みも `paramiko` で実施するため、`puttygen` などの外部コマンドは不要です。
 
 #### HTTP proxy 経由で SFTP 接続するときの環境変数例
 
