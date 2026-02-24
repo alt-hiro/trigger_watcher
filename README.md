@@ -46,7 +46,17 @@ TARGET_DIR = r"/path/to/your/directory"
 SFTP_HOST = "sftp.example.com"
 SFTP_PORT = 22
 SFTP_USERNAME = "your_username"
-SFTP_PASSWORD = "your_password"
+SFTP_AUTH_METHOD = "password"
+SFTP_PASSWORD = os.getenv("SFTP_PASSWORD", "")
+SFTP_PRIVATE_KEY_ENV = "SFTP_PRIVATE_KEY"
+SFTP_PRIVATE_KEY_PASSPHRASE = os.getenv("SFTP_PRIVATE_KEY_PASSPHRASE", "")
+
+SFTP_USE_HTTP_PROXY = os.getenv("SFTP_USE_HTTP_PROXY", "false").lower() in ("1", "true", "yes", "on")
+SFTP_HTTP_PROXY_HOST = os.getenv("SFTP_HTTP_PROXY_HOST", "")
+SFTP_HTTP_PROXY_PORT = int(os.getenv("SFTP_HTTP_PROXY_PORT", "8080"))
+SFTP_HTTP_PROXY_USERNAME = os.getenv("SFTP_HTTP_PROXY_USERNAME", "")
+SFTP_HTTP_PROXY_PASSWORD = os.getenv("SFTP_HTTP_PROXY_PASSWORD", "")
+
 SFTP_TARGET_DIR = "/path/to/remote/directory"
 # ========================================================
 ```
@@ -67,12 +77,45 @@ SFTP_TARGET_DIR = "/path/to/remote/directory"
   - 監視起点の許容ラグ（時間）
   - 監視対象時刻は「プログラム実行時刻 - `LOOKBACK_HOURS` 時間」
   - 既に `trigger.txt` が存在していても、この時刻より古い更新時刻なら未検知として扱う
-- `SFTP_*`
-  - SFTP 接続情報
+- `SFTP_AUTH_METHOD`
+  - SFTP 認証方式（`"password"` / `"key"`）
+- `SFTP_PASSWORD`
+  - `password` 認証時のパスワード（環境変数 `SFTP_PASSWORD` から読み込み）
+- `SFTP_PRIVATE_KEY_ENV`
+  - `key` 認証時に利用する秘密鍵文字列の環境変数名
+  - 例: `SFTP_PRIVATE_KEY` に OpenSSH 形式の秘密鍵本文を設定
+- `SFTP_PRIVATE_KEY_PASSPHRASE`
+  - 鍵がパスフレーズ付きの場合のパスフレーズ（任意）
+- `SFTP_USE_HTTP_PROXY`
+  - `True` のとき HTTP proxy（CONNECT）経由で SFTP 接続
+- `SFTP_HTTP_PROXY_HOST` / `SFTP_HTTP_PROXY_PORT`
+  - HTTP proxy の接続先
+- `SFTP_HTTP_PROXY_USERNAME` / `SFTP_HTTP_PROXY_PASSWORD`
+  - HTTP proxy の Basic 認証情報（必要な場合のみ）
 - `SFTP_TARGET_DIR`
   - リモート監視先ディレクトリ
 
-> 補足: `SFTP_PASSWORD` は現在直書きですが、運用時は環境変数化を推奨します。
+> 補足: 秘密鍵を 1 行で環境変数に入れる場合は、改行を `\n` として設定しておくと読み込み時に復元されます。
+
+#### 鍵認証を使うときの環境変数例
+
+```bash
+export SFTP_AUTH_METHOD="key"
+export SFTP_PRIVATE_KEY="-----BEGIN OPENSSH PRIVATE KEY-----\n...\n-----END OPENSSH PRIVATE KEY-----"
+# パスフレーズ付き鍵の場合のみ
+export SFTP_PRIVATE_KEY_PASSPHRASE="your_passphrase"
+```
+
+#### HTTP proxy 経由で SFTP 接続するときの環境変数例
+
+```bash
+export SFTP_USE_HTTP_PROXY="true"
+export SFTP_HTTP_PROXY_HOST="proxy.example.com"
+export SFTP_HTTP_PROXY_PORT="8080"
+# proxy 認証が必要な場合のみ
+export SFTP_HTTP_PROXY_USERNAME="proxy_user"
+export SFTP_HTTP_PROXY_PASSWORD="proxy_pass"
+```
 
 ### 2. 実行する
 

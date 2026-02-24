@@ -5,9 +5,12 @@
 利用者は設定セクションの値を編集することで、監視先やリトライ回数を変更できます。
 """
 
+import base64
 import os
+import socket
 import sys
 import time
+from io import StringIO
 from datetime import datetime
 
 # ===== 設定（担当者が手で変更する想定のエリア） =====
@@ -29,10 +32,17 @@ TARGET_DIR = r"/path/to/your/directory"  # 監視するローカルディレク�
 SFTP_HOST = "sftp.example.com"
 SFTP_PORT = 22
 SFTP_USERNAME = "your_username"
-SFTP_PASSWORD = "your_password"  # 一旦は直書き。将来的には環境変数の利用を推奨。
+SFTP_AUTH_METHOD = "password"  # "password" または "key"
+SFTP_PASSWORD = os.getenv("SFTP_PASSWORD", "")  # password 認証で利用
+SFTP_PRIVATE_KEY_ENV = "SFTP_PRIVATE_KEY"  # key 認証で利用する秘密鍵の環境変数名
+SFTP_PRIVATE_KEY_PASSPHRASE = os.getenv("SFTP_PRIVATE_KEY_PASSPHRASE", "")  # 任意
 
-# 将来的に環境変数を使う場合の例（必要になったらコメントアウトを外す）
-# SFTP_PASSWORD = os.getenv("SFTP_PASSWORD", "")
+SFTP_USE_HTTP_PROXY_RAW = os.getenv("SFTP_USE_HTTP_PROXY", "false")
+SFTP_USE_HTTP_PROXY = SFTP_USE_HTTP_PROXY_RAW.lower() in ("1", "true", "yes", "on")  # True のとき HTTP proxy (CONNECT) 経由で SFTP 接続する
+SFTP_HTTP_PROXY_HOST = os.getenv("SFTP_HTTP_PROXY_HOST", "")
+SFTP_HTTP_PROXY_PORT = int(os.getenv("SFTP_HTTP_PROXY_PORT", "8080"))
+SFTP_HTTP_PROXY_USERNAME = os.getenv("SFTP_HTTP_PROXY_USERNAME", "")  # 任意
+SFTP_HTTP_PROXY_PASSWORD = os.getenv("SFTP_HTTP_PROXY_PASSWORD", "")  # 任意
 
 SFTP_TARGET_DIR = "/path/to/remote/directory"  # 監視するリモートディレクトリ
 # ========================================================
@@ -95,6 +105,94 @@ def _wait_for_sftp_trigger(watch_start_timestamp: float) -> int:
         return 1
 
     remote_trigger_path = f"{SFTP_TARGET_DIR.rstrip('/')}/{TRIGGER_FILE}"
+    auth_method = SFTP_AUTH_METHOD.lower().strip()
+
+    def _open_http_proxy_tunnel() -> socket.socket:
+        if not SFTP_HTTP_PROXY_HOST:
+            raise ValueError(
+                "SFTP_USE_HTTP_PROXY=True の場合は SFTP_HTTP_PROXY_HOST を設定してください。"
+            )
+
+        proxy_socket = socket.create_connection((SFTP_HTTP_PROXY_HOST, SFTP_HTTP_PROXY_PORT), timeout=10)
+        connect_lines = [
+            f"CONNECT {SFTP_HOST}:{SFTP_PORT} HTTP/1.1",
+            f"Host: {SFTP_HOST}:{SFTP_PORT}",
+            "Proxy-Connection: Keep-Alive",
+        ]
+
+        if SFTP_HTTP_PROXY_USERNAME:
+            auth_raw = f"{SFTP_HTTP_PROXY_USERNAME}:{SFTP_HTTP_PROXY_PASSWORD}".encode("utf-8")
+            auth_header = base64.b64encode(auth_raw).decode("ascii")
+            connect_lines.append(f"Proxy-Authorization: Basic {auth_header}")
+
+        connect_request = "\r\n".join(connect_lines) + "\r\n\r\n"
+        proxy_socket.sendall(connect_request.encode("utf-8"))
+
+        response = b""
+        while b"\r\n\r\n" not in response:
+            chunk = proxy_socket.recv(4096)
+            if not chunk:
+                proxy_socket.close()
+                raise ConnectionError("HTTP proxy からの応答が途中で切断されました。")
+            response += chunk
+            if len(response) > 65535:
+                proxy_socket.close()
+                raise ConnectionError("HTTP proxy の応答ヘッダーが大きすぎます。")
+
+        status_line = response.split(b"\r\n", 1)[0].decode("iso-8859-1", errors="replace")
+        if " 200 " not in status_line and not status_line.endswith(" 200"):
+            proxy_socket.close()
+            raise ConnectionError(f"HTTP proxy トンネル確立に失敗しました: {status_line}")
+
+        return proxy_socket
+
+    def _connect_transport(transport: "paramiko.Transport") -> None:
+        if auth_method == "password":
+            if not SFTP_PASSWORD:
+                raise ValueError("SFTP_PASSWORD が未設定です。環境変数に設定してください。")
+            transport.connect(username=SFTP_USERNAME, password=SFTP_PASSWORD)
+            return
+
+        if auth_method == "key":
+            private_key_content = os.getenv(SFTP_PRIVATE_KEY_ENV, "")
+            if not private_key_content:
+                raise ValueError(
+                    f"{SFTP_PRIVATE_KEY_ENV} が未設定です。秘密鍵を環境変数へ設定してください。"
+                )
+
+            normalized_key = private_key_content.replace("\\n", "\n")
+            key_stream = StringIO(normalized_key)
+
+            load_key_errors = []
+            private_key = None
+            for key_cls in (
+                paramiko.RSAKey,
+                paramiko.Ed25519Key,
+                paramiko.ECDSAKey,
+                paramiko.DSSKey,
+            ):
+                key_stream.seek(0)
+                try:
+                    private_key = key_cls.from_private_key(
+                        key_stream,
+                        password=SFTP_PRIVATE_KEY_PASSPHRASE or None,
+                    )
+                    break
+                except Exception as exc:  # noqa: PERF203
+                    load_key_errors.append(f"{key_cls.__name__}: {exc}")
+
+            if private_key is None:
+                raise ValueError(
+                    "秘密鍵の読み込みに失敗しました。"
+                    f"試行結果: {' | '.join(load_key_errors)}"
+                )
+
+            transport.connect(username=SFTP_USERNAME, pkey=private_key)
+            return
+
+        raise ValueError(
+            "未対応の SFTP_AUTH_METHOD です。'password' または 'key' を指定してください。"
+        )
 
     for attempt in range(1, MAX_RETRY + 1):
         _log(
@@ -106,9 +204,15 @@ def _wait_for_sftp_trigger(watch_start_timestamp: float) -> int:
 
         transport = None
         sftp = None
+        proxy_socket = None
         try:
-            transport = paramiko.Transport((SFTP_HOST, SFTP_PORT))
-            transport.connect(username=SFTP_USERNAME, password=SFTP_PASSWORD)
+            if SFTP_USE_HTTP_PROXY:
+                proxy_socket = _open_http_proxy_tunnel()
+                transport = paramiko.Transport(proxy_socket)
+            else:
+                transport = paramiko.Transport((SFTP_HOST, SFTP_PORT))
+
+            _connect_transport(transport)
             sftp = paramiko.SFTPClient.from_transport(transport)
 
             file_stat = sftp.stat(remote_trigger_path)
@@ -145,6 +249,8 @@ def _wait_for_sftp_trigger(watch_start_timestamp: float) -> int:
                 sftp.close()
             if transport is not None:
                 transport.close()
+            if proxy_socket is not None:
+                proxy_socket.close()
 
     return 1
 
