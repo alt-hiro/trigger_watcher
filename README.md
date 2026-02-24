@@ -50,6 +50,7 @@ SFTP_AUTH_METHOD = "password"
 SFTP_PASSWORD = os.getenv("SFTP_PASSWORD", "")
 SFTP_PRIVATE_KEY_ENV = "SFTP_PRIVATE_KEY"
 SFTP_PRIVATE_KEY_PASSPHRASE = os.getenv("SFTP_PRIVATE_KEY_PASSPHRASE", "")
+SFTP_PRIVATE_KEY_PATH = os.getenv("SFTP_PRIVATE_KEY_PATH", "")
 
 SFTP_USE_HTTP_PROXY = os.getenv("SFTP_USE_HTTP_PROXY", "false").lower() in ("1", "true", "yes", "on")
 SFTP_HTTP_PROXY_HOST = os.getenv("SFTP_HTTP_PROXY_HOST", "")
@@ -86,6 +87,9 @@ SFTP_TARGET_DIR = "/path/to/remote/directory"
   - 例: `SFTP_PRIVATE_KEY` に OpenSSH 形式の秘密鍵本文を設定
 - `SFTP_PRIVATE_KEY_PASSPHRASE`
   - 鍵がパスフレーズ付きの場合のパスフレーズ（任意）
+- `SFTP_PRIVATE_KEY_PATH`
+  - `key` 認証時に利用する秘密鍵ファイルパス（任意）
+  - `.ppk` を指定した場合は `puttygen` がインストール済みなら自動で OpenSSH 形式へ変換して利用
 - `SFTP_USE_HTTP_PROXY`
   - `True` のとき HTTP proxy（CONNECT）経由で SFTP 接続
 - `SFTP_HTTP_PROXY_HOST` / `SFTP_HTTP_PROXY_PORT`
@@ -96,6 +100,7 @@ SFTP_TARGET_DIR = "/path/to/remote/directory"
   - リモート監視先ディレクトリ
 
 > 補足: 秘密鍵を 1 行で環境変数に入れる場合は、改行を `\n` として設定しておくと読み込み時に復元されます。
+> `SFTP_PRIVATE_KEY` と `SFTP_PRIVATE_KEY_PATH` を両方設定した場合は `SFTP_PRIVATE_KEY` が優先されます。
 
 #### 鍵認証を使うときの環境変数例
 
@@ -105,6 +110,18 @@ export SFTP_PRIVATE_KEY="-----BEGIN OPENSSH PRIVATE KEY-----\n...\n-----END OPEN
 # パスフレーズ付き鍵の場合のみ
 export SFTP_PRIVATE_KEY_PASSPHRASE="your_passphrase"
 ```
+
+
+#### ppk 鍵ファイルを使うときの環境変数例
+
+```bash
+export SFTP_AUTH_METHOD="key"
+export SFTP_PRIVATE_KEY_PATH="/path/to/key.ppk"
+# ppk が暗号化されている場合のみ
+export SFTP_PRIVATE_KEY_PASSPHRASE="your_ppk_passphrase"
+```
+
+> 注意: `.ppk` を直接使う場合は `puttygen` コマンドが必要です。未導入の場合は、事前に OpenSSH 形式へ変換してください。
 
 #### HTTP proxy 経由で SFTP 接続するときの環境変数例
 
