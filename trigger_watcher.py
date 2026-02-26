@@ -7,10 +7,12 @@
 
 import base64
 import fnmatch
+import json
 import os
 import socket
 import sys
 import time
+import urllib.request
 from io import StringIO
 from pathlib import Path
 from datetime import datetime
@@ -48,7 +50,25 @@ SFTP_HTTP_PROXY_USERNAME = os.getenv("SFTP_HTTP_PROXY_USERNAME", "")  # 任意
 SFTP_HTTP_PROXY_PASSWORD = os.getenv("SFTP_HTTP_PROXY_PASSWORD", "")  # 任意
 
 SFTP_TARGET_DIR = "/path/to/remote/directory"  # 監視するリモートディレクトリ
+
+# ---- webhook 通知 ----
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
+# 監視中の通知を送信する時刻（24時間表記・時:分）
+CHECKPOINT_TIMES = ["09:00", "10:00", "11:00"]
 # ========================================================
+
+
+MESSAGE_BY_STATUS_CODE = {
+    100: "正常に BlueYonder からデータが出力されました。",
+    200: "指定した時間になりましたが、まだ BlueYonder から Outbound ファイルが出力されていません。",
+    300: "継続して監視をしましたが、BlueYonder から Outbound ファイルが出力されませんでした。",
+}
+
+STATUS_LABEL_BY_STATUS_CODE = {
+    100: "✅ SUCCESS",
+    200: "⚠️ WARN",
+    300: "❌ ERROR",
+}
 
 
 def _log(level: str, message: str, attempt: int | None = None, total: int | None = None) -> None:
@@ -67,11 +87,66 @@ def _log(level: str, message: str, attempt: int | None = None, total: int | None
     print(f"[{timestamp}] [{level}]{progress} {message}")
 
 
-def _wait_for_local_trigger(watch_start_timestamp: float) -> int:
+def send_message(status_code: int) -> None:
+    """Webhook にステータスメッセージを送信する。"""
+    if not WEBHOOK_URL:
+        _log("INFO", "WEBHOOK_URL が未設定のため webhook 送信をスキップします。")
+        return
+
+    if status_code not in MESSAGE_BY_STATUS_CODE:
+        raise ValueError(f"未対応のステータスコードです: {status_code}")
+
+    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    status_label = STATUS_LABEL_BY_STATUS_CODE[status_code]
+    message = MESSAGE_BY_STATUS_CODE[status_code]
+    final_message = f"[{now_text}] STATUS: {status_label}\n{message}"
+
+    payload = {"text": final_message}
+    request = urllib.request.Request(
+        WEBHOOK_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+
+    try:
+        with urllib.request.urlopen(request) as response:
+            _log("INFO", f"webhook を送信しました。status={response.status}, code={status_code}")
+    except Exception as exc:  # noqa: BLE001
+        _log("ERROR", f"webhook 送信に失敗しました。code={status_code}, error={exc}")
+
+
+def _parse_checkpoint_minutes() -> list[int]:
+    """CHECKPOINT_TIMES を分単位へ変換する。"""
+    checkpoint_minutes: list[int] = []
+    for checkpoint_time in CHECKPOINT_TIMES:
+        try:
+            hour_text, minute_text = checkpoint_time.split(":", 1)
+            minutes = int(hour_text) * 60 + int(minute_text)
+        except ValueError as exc:
+            raise ValueError(
+                f"CHECKPOINT_TIMES の形式が不正です: {checkpoint_time}. 例: '09:00'"
+            ) from exc
+        checkpoint_minutes.append(minutes)
+    return checkpoint_minutes
+
+
+def _send_checkpoint_message_if_needed(checkpoint_minutes: list[int], sent_checkpoints: set[int]) -> None:
+    """指定時刻を過ぎた未送信チェックポイントに対して監視中メッセージを送信する。"""
+    now = datetime.now()
+    now_minutes = now.hour * 60 + now.minute
+
+    for checkpoint_minute in checkpoint_minutes:
+        if checkpoint_minute <= now_minutes and checkpoint_minute not in sent_checkpoints:
+            send_message(200)
+            sent_checkpoints.add(checkpoint_minute)
+
+
+def _wait_for_local_trigger(watch_start_timestamp: float, checkpoint_minutes: list[int], sent_checkpoints: set[int]) -> int:
     """ローカルファイルシステム上の trigger ファイルを待機する。"""
     target_dir = Path(TARGET_DIR)
 
     for attempt in range(1, MAX_RETRY + 1):
+        _send_checkpoint_message_if_needed(checkpoint_minutes, sent_checkpoints)
         _log("INFO", f"ローカルパスを確認中: {target_dir}/{TRIGGER_FILE}", attempt, MAX_RETRY)
 
         try:
@@ -115,7 +190,7 @@ def _wait_for_local_trigger(watch_start_timestamp: float) -> int:
     return 1
 
 
-def _wait_for_sftp_trigger(watch_start_timestamp: float) -> int:
+def _wait_for_sftp_trigger(watch_start_timestamp: float, checkpoint_minutes: list[int], sent_checkpoints: set[int]) -> int:
     """SFTP サーバー上の trigger ファイルを待機する。"""
     try:
         import paramiko
@@ -245,6 +320,7 @@ def _wait_for_sftp_trigger(watch_start_timestamp: float) -> int:
         )
 
     for attempt in range(1, MAX_RETRY + 1):
+        _send_checkpoint_message_if_needed(checkpoint_minutes, sent_checkpoints)
         _log(
             "INFO",
             f"SFTP パスを確認中: {SFTP_HOST}:{remote_target_dir}/{TRIGGER_FILE}",
@@ -317,6 +393,8 @@ def _wait_for_sftp_trigger(watch_start_timestamp: float) -> int:
 def wait_for_trigger() -> int:
     """設定された監視方式で trigger ファイルの出現を待機する。"""
     watch_type = WATCH_TYPE.lower().strip()
+    checkpoint_minutes = _parse_checkpoint_minutes()
+    sent_checkpoints: set[int] = set()
     watch_start_timestamp = time.time() - (LOOKBACK_HOURS * 60 * 60)
     watch_start_datetime = datetime.fromtimestamp(watch_start_timestamp).strftime("%Y-%m-%d %H:%M:%S")
     _log(
@@ -328,13 +406,25 @@ def wait_for_trigger() -> int:
     )
 
     if watch_type == "local":
-        return _wait_for_local_trigger(watch_start_timestamp)
+        return _wait_for_local_trigger(watch_start_timestamp, checkpoint_minutes, sent_checkpoints)
     if watch_type == "sftp":
-        return _wait_for_sftp_trigger(watch_start_timestamp)
+        return _wait_for_sftp_trigger(watch_start_timestamp, checkpoint_minutes, sent_checkpoints)
 
     _log("ERROR", f"未対応の WATCH_TYPE: {WATCH_TYPE}。'local' または 'sftp' を指定してください。")
     return 1
 
 
 if __name__ == "__main__":
-    sys.exit(wait_for_trigger())
+    try:
+        exit_code = wait_for_trigger()
+    except Exception as exc:  # noqa: BLE001
+        _log("ERROR", f"予期せぬエラーで終了します: {exc}")
+        send_message(300)
+        sys.exit(1)
+
+    if exit_code == 0:
+        send_message(100)
+    else:
+        send_message(300)
+
+    sys.exit(exit_code)
