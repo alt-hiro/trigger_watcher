@@ -15,7 +15,7 @@ import time
 import urllib.request
 from io import StringIO
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from trigger_watcher_config import (
     CHECK_INTERVAL_SECONDS,
     CHECKPOINT_TIMES,
@@ -114,23 +114,51 @@ def _parse_checkpoint_minutes() -> list[int]:
     return checkpoint_minutes
 
 
-def _send_checkpoint_message_if_needed(checkpoint_minutes: list[int], sent_checkpoints: set[int]) -> None:
-    """指定時刻を過ぎた未送信チェックポイントに対して監視中メッセージを送信する。"""
+def _build_checkpoint_schedule(
+    checkpoint_minutes: list[int],
+    watch_start_datetime: datetime,
+    watch_end_datetime: datetime,
+) -> list[datetime]:
+    """監視期間内で通知対象となるチェックポイント時刻を構築する。"""
+    schedule: list[datetime] = []
+
+    target_date = watch_start_datetime.date()
+    while datetime.combine(target_date, datetime.min.time()) <= watch_end_datetime:
+        for checkpoint_minute in checkpoint_minutes:
+            checkpoint_datetime = datetime.combine(
+                target_date,
+                datetime.min.time(),
+            ) + timedelta(minutes=checkpoint_minute)
+
+            if watch_start_datetime <= checkpoint_datetime <= watch_end_datetime:
+                schedule.append(checkpoint_datetime)
+
+        target_date += timedelta(days=1)
+
+    return sorted(schedule)
+
+
+def _send_checkpoint_message_if_needed(checkpoint_schedule: list[datetime], sent_checkpoints: set[str]) -> None:
+    """指定時刻を迎えた未送信チェックポイントに対して監視中メッセージを送信する。"""
     now = datetime.now()
-    now_minutes = now.hour * 60 + now.minute
 
-    for checkpoint_minute in checkpoint_minutes:
-        if checkpoint_minute <= now_minutes and checkpoint_minute not in sent_checkpoints:
+    for checkpoint_datetime in checkpoint_schedule:
+        checkpoint_key = checkpoint_datetime.strftime("%Y-%m-%d %H:%M")
+        if checkpoint_datetime <= now and checkpoint_key not in sent_checkpoints:
             send_message(200)
-            sent_checkpoints.add(checkpoint_minute)
+            sent_checkpoints.add(checkpoint_key)
 
 
-def _wait_for_local_trigger(watch_start_timestamp: float, checkpoint_minutes: list[int], sent_checkpoints: set[int]) -> int:
+def _wait_for_local_trigger(
+    watch_start_timestamp: float,
+    checkpoint_schedule: list[datetime],
+    sent_checkpoints: set[str],
+) -> int:
     """ローカルファイルシステム上の trigger ファイルを待機する。"""
     target_dir = Path(TARGET_DIR)
 
     for attempt in range(1, MAX_RETRY + 1):
-        _send_checkpoint_message_if_needed(checkpoint_minutes, sent_checkpoints)
+        _send_checkpoint_message_if_needed(checkpoint_schedule, sent_checkpoints)
         _log("INFO", f"ローカルパスを確認中: {target_dir}/{TRIGGER_FILE}", attempt, MAX_RETRY)
 
         try:
@@ -174,7 +202,11 @@ def _wait_for_local_trigger(watch_start_timestamp: float, checkpoint_minutes: li
     return 1
 
 
-def _wait_for_sftp_trigger(watch_start_timestamp: float, checkpoint_minutes: list[int], sent_checkpoints: set[int]) -> int:
+def _wait_for_sftp_trigger(
+    watch_start_timestamp: float,
+    checkpoint_schedule: list[datetime],
+    sent_checkpoints: set[str],
+) -> int:
     """SFTP サーバー上の trigger ファイルを待機する。"""
     try:
         import paramiko
@@ -304,7 +336,7 @@ def _wait_for_sftp_trigger(watch_start_timestamp: float, checkpoint_minutes: lis
         )
 
     for attempt in range(1, MAX_RETRY + 1):
-        _send_checkpoint_message_if_needed(checkpoint_minutes, sent_checkpoints)
+        _send_checkpoint_message_if_needed(checkpoint_schedule, sent_checkpoints)
         _log(
             "INFO",
             f"SFTP パスを確認中: {SFTP_HOST}:{remote_target_dir}/{TRIGGER_FILE}",
@@ -378,21 +410,36 @@ def wait_for_trigger() -> int:
     """設定された監視方式で trigger ファイルの出現を待機する。"""
     watch_type = WATCH_TYPE.lower().strip()
     checkpoint_minutes = _parse_checkpoint_minutes()
-    sent_checkpoints: set[int] = set()
+    sent_checkpoints: set[str] = set()
+    watch_start_datetime = datetime.now()
+    watch_end_datetime = watch_start_datetime + timedelta(seconds=MAX_RETRY * CHECK_INTERVAL_SECONDS)
+    checkpoint_schedule = _build_checkpoint_schedule(
+        checkpoint_minutes,
+        watch_start_datetime,
+        watch_end_datetime,
+    )
     watch_start_timestamp = time.time() - (LOOKBACK_HOURS * 60 * 60)
-    watch_start_datetime = datetime.fromtimestamp(watch_start_timestamp).strftime("%Y-%m-%d %H:%M:%S")
+    watch_start_datetime_text = datetime.fromtimestamp(watch_start_timestamp).strftime("%Y-%m-%d %H:%M:%S")
     _log(
         "INFO",
         (
             "監視対象時刻を設定しました。"
-            f"この時刻以降に更新された {TRIGGER_FILE} に一致するファイルを検知します: {watch_start_datetime}"
+            f"この時刻以降に更新された {TRIGGER_FILE} に一致するファイルを検知します: {watch_start_datetime_text}"
         ),
     )
+    if checkpoint_schedule:
+        _log(
+            "INFO",
+            "監視中メッセージ送信予定時刻: "
+            + ", ".join(checkpoint.strftime("%Y-%m-%d %H:%M") for checkpoint in checkpoint_schedule),
+        )
+    else:
+        _log("INFO", "今回の監視期間内に送信対象となる CHECKPOINT_TIMES はありません。")
 
     if watch_type == "local":
-        return _wait_for_local_trigger(watch_start_timestamp, checkpoint_minutes, sent_checkpoints)
+        return _wait_for_local_trigger(watch_start_timestamp, checkpoint_schedule, sent_checkpoints)
     if watch_type == "sftp":
-        return _wait_for_sftp_trigger(watch_start_timestamp, checkpoint_minutes, sent_checkpoints)
+        return _wait_for_sftp_trigger(watch_start_timestamp, checkpoint_schedule, sent_checkpoints)
 
     _log("ERROR", f"未対応の WATCH_TYPE: {WATCH_TYPE}。'local' または 'sftp' を指定してください。")
     return 1
